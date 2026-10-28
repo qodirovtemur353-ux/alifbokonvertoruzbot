@@ -23,7 +23,7 @@ from aiogram.types import (
 # BOT_TOKEN, ADMIN_ID
 # Tokenni kod ichiga yozmang.
 # ============================================================
-BOT_TOKEN = os.getenv("9150360254:AAF27zMWU81-Z3uX9yxsLIwY7mN7zpvphws", "").strip()
+BOT_TOKEN = os.getenv("9208852498:AAHQApzwGn536an9bVAkyPbDGNe6QJn1CQE", "").strip()
 ADMIN_ID = int(os.getenv("komilaxon", "0"))
 FREE_LIMIT = 5
 VIP_PRICE = "25 000 so'm / oyiga"
