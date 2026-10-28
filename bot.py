@@ -313,7 +313,6 @@ async def text_handler(message: types.Message):
             reply_markup=vip_inline_keyboard()
         )
         return
-
     converted_text = convert_to_new_latin(message.text)
     increment_user_usage(message.from_user.id)
 
