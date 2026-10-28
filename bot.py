@@ -1,11 +1,12 @@
-
 import asyncio
 import logging
 import os
 import re
 import sqlite3
 from datetime import datetime
+from pathlib import Path
 
+import docx
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
@@ -15,319 +16,456 @@ from aiogram.types import (
     KeyboardButton,
     ReplyKeyboardMarkup,
 )
-import docx
 
-# ==========================================
-# 1. SOZLAMALAR (TOKENINGIZNI SHU YERGA YOZING)
-# ==========================================
-BOT_TOKEN = "9150360254:AAF27zMWU81-Z3uX9yxsLIwY7mN7zpvphws"
-ADMIN_ID = 123456789
+# ============================================================
+# SOZLAMALAR
+# Render -> Service -> Environment bo'limida quyidagilarni kiriting:
+# BOT_TOKEN, ADMIN_ID
+# Tokenni kod ichiga yozmang.
+# ============================================================
+BOT_TOKEN = os.getenv("9150360254:AAF27zMWU81-Z3uX9yxsLIwY7mN7zpvphws", "").strip()
+ADMIN_ID = int(os.getenv("komilaxon", "0"))
 FREE_LIMIT = 5
 VIP_PRICE = "25 000 so'm / oyiga"
 CARD_NUMBER = "9860 0803 8904 1296 (Ism Familiya)"
-ADMIN_USERNAME = "@komilxonacademy"
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "komilxonacademy").strip().lstrip("@")
 
-# ==========================================
-# 2. BAZA (SQLite)
-# ==========================================
-DB_FILE = "converter_bot.db"
+DB_FILE = os.getenv("DB_FILE", "converter_bot.db")
+DOWNLOAD_DIR = Path("downloads")
+CONVERTED_DIR = Path("converted")
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+# ============================================================
+# MA'LUMOTLAR BAZASI
+# ============================================================
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            full_name TEXT,
-            used_count INTEGER DEFAULT 0,
-            is_vip INTEGER DEFAULT 0,
-            joined_at TEXT
+    with sqlite3.connect(DB_FILE) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                full_name TEXT,
+                used_count INTEGER NOT NULL DEFAULT 0,
+                is_vip INTEGER NOT NULL DEFAULT 0,
+                joined_at TEXT
+            )
+            """
         )
-    ''')
-    conn.commit()
-    conn.close()
 
-def get_or_create_user(user_id, username, full_name):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT user_id, used_count, is_vip FROM users WHERE user_id = ?", (user_id,))
-    row = c.fetchone()
-    if not row:
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        c.execute(
-            "INSERT INTO users (user_id, username, full_name, used_count, is_vip, joined_at) VALUES (?, ?, ?, 0, 0, ?)",
-            (user_id, username, full_name, now)
+
+def get_or_create_user(user_id: int, username: str | None, full_name: str):
+    with sqlite3.connect(DB_FILE) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM users WHERE user_id = ?", (user_id,)
+        ).fetchone()
+
+        if row is None:
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            conn.execute(
+                """
+                INSERT INTO users
+                (user_id, username, full_name, used_count, is_vip, joined_at)
+                VALUES (?, ?, ?, 0, 0, ?)
+                """,
+                (user_id, username, full_name, now),
+            )
+            return {"user_id": user_id, "used_count": 0, "is_vip": 0}
+
+        # Username yoki ism o'zgargan bo'lsa, bazani yangilash
+        conn.execute(
+            "UPDATE users SET username = ?, full_name = ? WHERE user_id = ?",
+            (username, full_name, user_id),
         )
-        conn.commit()
-        conn.close()
-        return {"user_id": user_id, "used_count": 0, "is_vip": 0}
-    conn.close()
-    return {"user_id": row[0], "used_count": row[1], "is_vip": row[2]}
+        return {
+            "user_id": row["user_id"],
+            "used_count": row["used_count"],
+            "is_vip": row["is_vip"],
+        }
 
-def increment_user_usage(user_id):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("UPDATE users SET used_count = used_count + 1 WHERE user_id = ?", (user_id,))
-    conn.commit()
-    conn.close()
 
-def set_vip_status(user_id, is_vip=1):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("UPDATE users SET is_vip = ? WHERE user_id = ?", (is_vip, user_id))
-    conn.commit()
-    conn.close()
+def increment_user_usage(user_id: int):
+    with sqlite3.connect(DB_FILE) as conn:
+        conn.execute(
+            "UPDATE users SET used_count = used_count + 1 WHERE user_id = ?",
+            (user_id,),
+        )
 
-# ==========================================
-# 3. 2026-YIL ALIFBO O'GIRISH QOIDALARI
-# ==========================================
+
+def set_vip_status(user_id: int, is_vip: int = 1):
+    with sqlite3.connect(DB_FILE) as conn:
+        row = conn.execute(
+            "SELECT user_id FROM users WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        if row:
+            conn.execute(
+                "UPDATE users SET is_vip = ? WHERE user_id = ?",
+                (is_vip, user_id),
+            )
+            return True
+        return False
+
+
+# ============================================================
+# MATNNI YANGI ALIFBO BELGILARIGA O'GIRISH
+# Bu qoidalar foydalanuvchi bergan loyihadagi qoidalarga asoslangan.
+# ============================================================
 AP = r"['ʻ‘`´ʼ’\u02bb\u02bc\u2018\u2019]"
+
 
 def convert_to_new_latin(text: str) -> str:
     if not text:
         return text
 
-    # O' / Oʻ -> Ö
+    # Avval uzun birikmalarni o'giramiz; katta-kichik harf saqlanadi.
     text = re.sub(rf"O{AP}", "Ö", text)
     text = re.sub(rf"o{AP}", "ö", text)
-
-    # G' / Gʻ -> Ğ
     text = re.sub(rf"G{AP}", "Ğ", text)
     text = re.sub(rf"g{AP}", "ğ", text)
 
-    # Sh -> Ş
     text = re.sub(r"SH", "Ş", text)
     text = re.sub(r"Sh", "Ş", text)
     text = re.sub(r"sH", "ş", text)
     text = re.sub(r"sh", "ş", text)
 
-    # Ch -> Ç
     text = re.sub(r"CH", "Ç", text)
     text = re.sub(r"Ch", "Ç", text)
     text = re.sub(r"cH", "ç", text)
     text = re.sub(r"ch", "ç", text)
-
     return text
 
+
 def process_docx_file(input_file: str, output_file: str):
-    doc = docx.Document(input_file)
+    document = docx.Document(input_file)
 
-    for p in doc.paragraphs:
-        for r in p.runs:
-            r.text = convert_to_new_latin(r.text)
+    def convert_paragraphs(paragraphs):
+        for paragraph in paragraphs:
+            for run in paragraph.runs:
+                run.text = convert_to_new_latin(run.text)
 
-    for table in doc.tables:
+    def convert_table(table):
         for row in table.rows:
             for cell in row.cells:
-                for p in cell.paragraphs:
-                    for r in p.runs:
-                        r.text = convert_to_new_latin(r.text)
+                convert_paragraphs(cell.paragraphs)
+                for nested_table in cell.tables:
+                    convert_table(nested_table)
 
-    doc.save(output_file)
+    convert_paragraphs(document.paragraphs)
+    for table in document.tables:
+        convert_table(table)
 
-# ==========================================
-# 4. TUGMALAR
-# ==========================================
+    # Word hujjatining sarlavha va pastki kolontitrlari
+    for section in document.sections:
+        for part in (section.header, section.footer):
+            convert_paragraphs(part.paragraphs)
+            for table in part.tables:
+                convert_table(table)
+
+    document.save(output_file)
+
+
+# ============================================================
+# TELEGRAM TUGMALARI
+# ============================================================
 main_keyboard = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="📝 Matn yuborish"), KeyboardButton(text="📂 Hujjat (.docx) yuklash")],
-
-[KeyboardButton(text="⭐ VIP Obuna / Tariflar"), KeyboardButton(text="📊 Mening hisobim")],
-        [KeyboardButton(text="ℹ️ 2026 Alifbo haqida"), KeyboardButton(text="📞 Bog'lanish / Yordam")]
+        [
+            KeyboardButton(text="📝 Matn yuborish"),
+            KeyboardButton(text="📂 Hujjat (.docx) yuklash"),
+        ],
+        [
+            KeyboardButton(text="⭐ VIP Obuna / Tariflar"),
+            KeyboardButton(text="📊 Mening hisobim"),
+        ],
+        [
+            KeyboardButton(text="ℹ️ 2026 Alifbo haqida"),
+            KeyboardButton(text="📞 Bog'lanish / Yordam"),
+        ],
     ],
-    resize_keyboard=True
+    resize_keyboard=True,
 )
 
-def vip_inline_keyboard():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👨‍💻 Adminga to'lov chekini yuborish", url=f"https://t.me/{ADMIN_USERNAME}")],
-    ])
 
-# ==========================================
-# 5. BOT HANDLERLARI
-# ==========================================
-logging.basicConfig(level=logging.INFO)
+def vip_inline_keyboard():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="👨‍💻 Adminga to'lov chekini yuborish",
+                    url=f"https://t.me/{ADMIN_USERNAME}",
+                )
+            ]
+        ]
+    )
+
+
+# ============================================================
+# BOT VA HANDLERLAR
+# ============================================================
+if not BOT_TOKEN:
+    raise RuntimeError(
+        "BOT_TOKEN topilmadi. Render Environment bo'limiga BOT_TOKEN kiriting."
+    )
+
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
+
+def get_user(message: types.Message):
+    return get_or_create_user(
+        message.from_user.id,
+        message.from_user.username,
+        message.from_user.full_name,
+    )
+
+
+def has_free_uses(user):
+    return bool(user["is_vip"]) or user["used_count"] < FREE_LIMIT
+
+
 @dp.message(CommandStart())
 async def start_handler(message: types.Message):
-    user = get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
-    remaining = "Cheksiz" if user["is_vip"] else max(0, FREE_LIMIT - user['used_count'])
-    
+    user = get_user(message)
+    remaining = (
+        "Cheksiz"
+        if user["is_vip"]
+        else str(max(0, FREE_LIMIT - user["used_count"]))
+    )
+
     welcome_text = (
         f"Assalomu alaykum, <b>{message.from_user.full_name}</b>!\n\n"
-        "🏛 <b>Yangi O'zbek-Lotin Alifbosi (2026) Konvertor Botiga xush kelibsiz!</b>\n\n"
-        "2026-yil 21-oktabrda imzolangan qonun bo'yicha 4 ta yangi harf:\n"
+        "🏛 <b>O'zbek-Lotin alifbosi konvertor botiga xush kelibsiz!</b>\n\n"
+        "Bot sozlamalarida belgilangan almashtirishlar:\n"
         "• <b>O' / Oʻ</b> ➔ <b>Ö ö</b>\n"
         "• <b>G' / Gʻ</b> ➔ <b>Ğ ğ</b>\n"
         "• <b>Sh sh</b> ➔ <b>Ş ş</b>\n"
         "• <b>Ch ch</b> ➔ <b>Ç ç</b>\n\n"
-        f"🎁 Sizda <b>{remaining} ta</b> bepul o'girish imkoniyati bor.\n\n"
-        "Foydalanish uchun matn yoki <b>.docx</b> Word faylingizni yuboring!"
+        f"🎁 Sizda <b>{remaining}</b> ta bepul o'girish imkoniyati bor.\n\n"
+        "Matn yuboring yoki Word (.docx) / matn (.txt) faylini jo'nating."
     )
-    await message.answer(welcome_text, parse_mode="HTML", reply_markup=main_keyboard)
+    await message.answer(
+        welcome_text, parse_mode="HTML", reply_markup=main_keyboard
+    )
+
 
 @dp.message(F.text == "📊 Mening hisobim")
 async def profile_handler(message: types.Message):
-    user = get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
-    status = "🌟 VIP Foydalanuvchi (Cheksiz)" if user["is_vip"] else "Standart (Bepul)"
-    remaining = "Cheksiz" if user["is_vip"] else max(0, FREE_LIMIT - user["used_count"])
-
+    user = get_user(message)
+    status = (
+        "🌟 VIP foydalanuvchi (cheksiz)"
+        if user["is_vip"]
+        else "Standart (bepul)"
+    )
+    remaining = (
+        "Cheksiz"
+        if user["is_vip"]
+        else str(max(0, FREE_LIMIT - user["used_count"]))
+    )
     text = (
-        f"👤 <b>Sizning profilingiz:</b>\n\n"
+        "👤 <b>Sizning profilingiz:</b>\n\n"
         f"• Telegram ID: <code>{user['user_id']}</code>\n"
         f"• Holat: <b>{status}</b>\n"
         f"• Ishlatilgan urinishlar: <b>{user['used_count']} ta</b>\n"
-        f"• Qolgan bepul o'girishlar: <b>{remaining} ta</b>\n"
+        f"• Qolgan bepul o'girishlar: <b>{remaining} ta</b>"
     )
-    kb = None if user["is_vip"] else vip_inline_keyboard()
-    await message.answer(text, parse_mode="HTML", reply_markup=kb)
+    await message.answer(
+        text,
+        parse_mode="HTML",
+        reply_markup=None if user["is_vip"] else vip_inline_keyboard(),
+    )
+
 
 @dp.message(F.text == "⭐ VIP Obuna / Tariflar")
 async def tariffs_handler(message: types.Message):
     text = (
-        "⭐ <b>VIP Obuna afzalliklari:</b>\n\n"
-        "✅ Cheksiz matn va Word (.docx) hujjatlarini o'girish\n"
-        "✅ Katta kitoblar, diplom va kurs ishlarini tezkor o'girish\n"
-        "✅ Hech qanday cheklovsiz va yuqori tezlikda ishlash\n\n"
+        "⭐ <b>VIP obuna afzalliklari:</b>\n\n"
+        "✅ Matn va Word (.docx) hujjatlarini cheksiz o'girish\n"
         f"💰 <b>Narxi:</b> {VIP_PRICE}\n"
         f"💳 <b>Karta raqami:</b> <code>{CARD_NUMBER}</code>\n\n"
-        f"<i>To'lov qilgach, chekni <a href='https://t.me/{ADMIN_USERNAME}'>@{ADMIN_USERNAME}</a> ga yuboring, VIP holat darhol yoqiladi!</i>"
+        "To'lovdan keyin chekni adminga yuboring. "
+        "Admin to'lovni tekshirib, /vip TELEGRAM_ID buyrug'i bilan "
+        "VIP holatini yoqishi mumkin."
     )
-    await message.answer(text, parse_mode="HTML", reply_markup=vip_inline_keyboard(), disable_web_page_preview=True)
+    await message.answer(
+        text,
+        parse_mode="HTML",
+        reply_markup=vip_inline_keyboard(),
+        disable_web_page_preview=True,
+    )
+
 
 @dp.message(F.text == "ℹ️ 2026 Alifbo haqida")
 async def info_handler(message: types.Message):
-    text = (
-        "📜 <b>2026-yil 21-oktabr qonuni haqida:</b>\n\n"
+    await message.answer(
+        "📜 <b>Konvertor qoidalari:</b>\n\n"
         "1. <b>O' / Oʻ ➔ Ö ö</b>\n"
         "2. <b>G' / Gʻ ➔ Ğ ğ</b>\n"
         "3. <b>Sh sh ➔ Ş ş</b>\n"
-        "4. <b>Ch ch ➔ Ç ç</b>\n"
-        "5. <b>ng</b> harflar birikmasi mustaqil harf emas deb belgilandi.\n"
-        "6. <b>Tutuq belgisi (')</b> o'z kuchida qoldi."
+        "4. <b>Ch ch ➔ Ç ç</b>\n\n"
+        "Eslatma: bu bot ichidagi almashtirish qoidalari. "
+        "Ularning rasmiy imlo yoki qonuniy standart ekanini alohida tekshiring.",
+        parse_mode="HTML",
     )
-    await message.answer(text, parse_mode="HTML")
+
 
 @dp.message(F.text == "📞 Bog'lanish / Yordam")
 async def contact_handler(message: types.Message):
     await message.answer(
-        f"Savol, taklif yoki VIP obunani faollashtirish bo'yicha:\n"
-        f"👨‍💻 Admin: @{ADMIN_USERNAME}\n"
-        "🤖 Bot 24/7 rejimda avtomatik ishlaydi.",
-        parse_mode="HTML"
+        f"Savol yoki VIP obuna bo'yicha admin: @{ADMIN_USERNAME}\n"
+        "Botdagi muammo haqida xabar yuborishingiz mumkin."
     )
+
 
 @dp.message(F.text == "📝 Matn yuborish")
 async def send_text_hint(message: types.Message):
-    await message.answer("O'girmoqchi bo'lgan matningizni shu yerga yozing yoki nusxalab yuboring!")
+    await message.answer(
+        "O'girmoqchi bo'lgan matningizni shu yerga yozing yoki nusxalab yuboring!"
+    )
+
 
 @dp.message(F.text == "📂 Hujjat (.docx) yuklash")
 async def send_file_hint(message: types.Message):
-    await message.answer("<b>.docx</b> Word hujjatingizni burchakdagi 📎 (skrepka) orqali fayl shaklida yuboring!")
+    await message.answer(
+        "📎 tugmasi orqali .docx Word yoki .txt faylini yuboring."
+    )
+
 
 @dp.message(Command("vip"))
 async def add_vip_cmd(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
+    if message.from_user.id != ADMIN_ID or ADMIN_ID == 0:
         return
-    parts = message.text.split()
-    if len(parts) >= 2:
-        try:
-            target_id = int(parts[1])
-            set_vip_status(target_id, 1)
-            await message.answer(f"✅ Foydalanuvchi <code>{target_id}</code> ga VIP maqomi berildi!", parse_mode="HTML")
-            try:
-                await bot.send_message(target_id, "🎉 <b>Tabriklaymiz! Hisobingizga VIP obuna yoqildi. Endi cheksiz foydalanishingiz mumkin!</b>", parse_mode="HTML")
-            except Exception:
-                pass
-        except ValueError:
-            await message.answer("Masalan: /vip 123456789")
+
+    parts = (message.text or "").split()
+    if len(parts) != 2:
+        await message.answer("Foydalanish: /vip TELEGRAM_ID")
+        return
+
+    try:
+        target_id = int(parts[1])
+    except ValueError:
+        await message.answer("Telegram ID faqat raqamlardan iborat bo'lishi kerak.")
+        return
+
+    if not set_vip_status(target_id, 1):
+        await message.answer(
+            "Bu foydalanuvchi bazada topilmadi. Avval botga /start yuborishi kerak."
+        )
+        return
+
+    await message.answer(
+        f"✅ <code>{target_id}</code> foydalanuvchiga VIP yoqildi!",
+        parse_mode="HTML",
+    )
+    try:
+        await bot.send_message(
+            target_id,
+            "🎉 Tabriklaymiz! Hisobingizga VIP obuna yoqildi.",
+        )
+    except Exception:
+        logger.exception("VIP xabari foydalanuvchiga yuborilmadi.")
+
 
 @dp.message(F.document)
 async def document_handler(message: types.Message):
-    user = get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
-
-    if not user["is_vip"] and user["used_count"] >= FREE_LIMIT:
+    user = get_user(message)
+    if not has_free_uses(user):
         await message.answer(
             "⚠️ <b>Bepul limitingiz tugadi!</b>\n\n"
-            "Cheksiz Word hujjatlarini o'girish uchun VIP obunani faollashtiring.",
+            "Davom etish uchun VIP obunani ko'ring.",
             parse_mode="HTML",
-            reply_markup=vip_inline_keyboard()
+            reply_markup=vip_inline_keyboard(),
         )
         return
 
-    doc = message.document
-    if not (doc.file_name.endswith('.docx') or doc.file_name.endswith('.txt')):
-        await message.answer("⚠️ Iltimos, faqat <b>.docx</b> (Word) yoki <b>.txt</b> fayllarni yuboring!", parse_mode="HTML")
+    document = message.document
+    filename = document.file_name or "file"
+    suffix = Path(filename).suffix.lower()
+
+    if suffix not in (".docx", ".txt"):
+        await message.answer(
+            "Iltimos, faqat .docx Word yoki .txt fayl yuboring."
+        )
         return
 
-    wait_msg = await message.answer("⏳ Hujjatingiz yuklab olinmoqda va yangi alifboga o'girilmoqda, kuting...")
+    wait_msg = await message.answer(
+        "⏳ Fayl qayta ishlanmoqda, iltimos kuting..."
+    )
+    DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    CONVERTED_DIR.mkdir(parents=True, exist_ok=True)
 
-    os.makedirs("downloads", exist_ok=True)
-    os.makedirs("converted", exist_ok=True)
-
-    input_path = f"downloads/{message.from_user.id}_{doc.file_name}"
-    output_filename = f"yangi_{doc.file_name}"
-    output_path = f"converted/{message.from_user.id}_{output_filename}"
-
-    file_info = await bot.get_file(doc.file_id)
-    await bot.download_file(file_info.file_path, input_path)
+    safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", Path(filename).name)
+    input_path = DOWNLOAD_DIR / f"{message.from_user.id}_{safe_name}"
+    output_name = f"yangi_{Path(safe_name).stem}{suffix}"
+    output_path = CONVERTED_DIR / f"{message.from_user.id}_{output_name}"
 
     try:
-        if doc.file_name.endswith('.docx'):
-            process_docx_file(input_path, output_path)
+        file_info = await bot.get_file(document.file_id)
+        await bot.download_file(file_info.file_path, destination=input_path)
+
+        if suffix == ".docx":
+            process_docx_file(str(input_path), str(output_path))
         else:
-            with open(input_path, 'r', encoding='utf-8', errors='ignore') as f:
-                content = f.read()
-            converted = convert_to_new_latin(content)
-            with open(output_path, 'w', encoding='utf-8') as f:
-                f.write(converted)
+            content = input_path.read_text(encoding="utf-8", errors="replace")
+            output_path.write_text(
+                convert_to_new_latin(content), encoding="utf-8"
+            )
 
         increment_user_usage(message.from_user.id)
-
-        return_file = FSInputFile(output_path, filename=output_filename)
         await message.answer_document(
-            document=return_file,
-            caption="✅ <b>Hujjatingiz yangi o'zbek alifbosiga (Ö, Ğ, Ş, Ç) muvaffaqiyatli o'tkazildi!</b>",
-            parse_mode="HTML"
+            document=FSInputFile(str(output_path), filename=output_name),
+            caption="✅ Faylingiz qayta ishlashdan o'tdi.",
         )
         await wait_msg.delete()
 
-    except Exception as e:
-        logging.error(f"Xatolik: {e}")
-        await wait_msg.edit_text("❌ Hujjatni qayta ishlashda xatolik yuz berdi.")
+    except Exception:
+        logger.exception("Faylni qayta ishlashda xatolik")
+        await wait_msg.edit_text(
+            "❌ Faylni qayta ishlashda xatolik yuz berdi. "
+            "Boshqa fayl bilan urinib ko'ring."
+        )
     finally:
-        if os.path.exists(input_path): os.remove(input_path)
-        if os.path.exists(output_path): os.remove(output_path)
+        for path in (input_path, output_path):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("Vaqtinchalik faylni o'chirib bo'lmadi: %s", path)
+
 
 @dp.message(F.text)
 async def text_handler(message: types.Message):
-    user = get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
-
-    if not user["is_vip"] and user["used_count"] >= FREE_LIMIT:
+    user = get_user(message)
+    if not has_free_uses(user):
         await message.answer(
             "⚠️ <b>Bepul limitingiz tugadi!</b>\n\n"
-            "Cheksiz o'girish uchun VIP obunani faollashtiring.",
+            "Davom etish uchun VIP obunani ko'ring.",
             parse_mode="HTML",
-            reply_markup=vip_inline_keyboard()
+            reply_markup=vip_inline_keyboard(),
         )
         return
-    converted_text = convert_to_new_latin(message.text)
+
+    converted_text = convert_to_new_latin(message.text or "")
     increment_user_usage(message.from_user.id)
 
-if len(converted_text) > 4000:
-        for i in range(0, len(converted_text), 4000):
-            await message.answer(converted_text[i:i+4000])
-    else:
-        await message.answer(converted_text)
+    # Telegram xabar uzunligi chegarasidan oshib ketmasligi uchun bo'lib yuborish
+    for start in range(0, len(converted_text), 4000):
+        await message.answer(converted_text[start : start + 4000])
+
 
 async def main():
     init_db()
-    print("Bot muvaffaqiyatli ishga tushdi...")
+    logger.info("Bot ishga tushmoqda...")
     await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await bot.session.close()
 
-if name == "main":
+
+if __name__ == "__main__":
     asyncio.run(main())
