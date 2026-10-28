@@ -19,12 +19,12 @@ import docx
 # ==========================================
 # 1. SOZLAMALAR (TOKENINGIZNI SHU YERGA YOZING)
 # ==========================================
-BOT_TOKEN = "9150360254:AAF27zMWU81-Z3uX9yxsLIwY7mN7zpvphws"      # @BotFather'dan olingan token
-ADMIN_ID = 123456789                                # O'zingizning Telegram ID raqamingiz
-FREE_LIMIT = 5                                      # Bepul urinishlar soni
-VIP_PRICE = "25 000 so'm / oyiga"                   # Oylik VIP obuna narxi
-CARD_NUMBER = "9860 0803 8904 1296(Vaxobova Komilaxon)"  # To'lov qabul qiladigan kartangiz
-ADMIN_USERNAME = "@komilaxonacademy"                 # Telegram username'ingiz (@ siz)
+BOT_TOKEN = "9150360254:AAF27zMWU81-Z3uX9yxsLIwY7mN7zpvphws"
+ADMIN_ID = 123456789
+FREE_LIMIT = 5
+VIP_PRICE = "25 000 so'm / oyiga"
+CARD_NUMBER = "9860 0803 8904 1296 (Ism Familiya)"
+ADMIN_USERNAME = "@komilxonacademy"
 
 # ==========================================
 # 2. BAZA (SQLite)
@@ -131,7 +131,8 @@ def process_docx_file(input_file: str, output_file: str):
 main_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="📝 Matn yuborish"), KeyboardButton(text="📂 Hujjat (.docx) yuklash")],
-        [KeyboardButton(text="⭐ VIP Obuna / Tariflar"), KeyboardButton(text="📊 Mening hisobim")],
+
+[KeyboardButton(text="⭐ VIP Obuna / Tariflar"), KeyboardButton(text="📊 Mening hisobim")],
         [KeyboardButton(text="ℹ️ 2026 Alifbo haqida"), KeyboardButton(text="📞 Bog'lanish / Yordam")]
     ],
     resize_keyboard=True
@@ -226,7 +227,6 @@ async def send_text_hint(message: types.Message):
 async def send_file_hint(message: types.Message):
     await message.answer("<b>.docx</b> Word hujjatingizni burchakdagi 📎 (skrepka) orqali fayl shaklida yuboring!")
 
-# Admin komandasi: /vip <user_id>
 @dp.message(Command("vip"))
 async def add_vip_cmd(message: types.Message):
     if message.from_user.id != ADMIN_ID:
@@ -244,7 +244,6 @@ async def add_vip_cmd(message: types.Message):
         except ValueError:
             await message.answer("Masalan: /vip 123456789")
 
-# Word (.docx) va matn hujjatlarini qabul qilish
 @dp.message(F.document)
 async def document_handler(message: types.Message):
     user = get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
@@ -302,12 +301,11 @@ async def document_handler(message: types.Message):
         if os.path.exists(input_path): os.remove(input_path)
         if os.path.exists(output_path): os.remove(output_path)
 
-# Oddiy matnlarni qabul qilish
 @dp.message(F.text)
 async def text_handler(message: types.Message):
     user = get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
 
-if not user["is_vip"] and user["used_count"] >= FREE_LIMIT:
+    if not user["is_vip"] and user["used_count"] >= FREE_LIMIT:
         await message.answer(
             "⚠️ <b>Bepul limitingiz tugadi!</b>\n\n"
             "Cheksiz o'girish uchun VIP obunani faollashtiring.",
@@ -319,13 +317,12 @@ if not user["is_vip"] and user["used_count"] >= FREE_LIMIT:
     converted_text = convert_to_new_latin(message.text)
     increment_user_usage(message.from_user.id)
 
-    if len(converted_text) > 4000:
+if len(converted_text) > 4000:
         for i in range(0, len(converted_text), 4000):
             await message.answer(converted_text[i:i+4000])
     else:
         await message.answer(converted_text)
 
-# Botni ishga tushirish
 async def main():
     init_db()
     print("Bot muvaffaqiyatli ishga tushdi...")
